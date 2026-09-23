@@ -11,20 +11,19 @@ public class ShelfInferenceClient : MonoBehaviour {
     public bool autoStart=true;
     [Min(0)] public float startupDelay=1f;
     [Min(.1f)] public float inferenceInterval=1f;
-    [Min(1)] public int timeoutSeconds=10;
+    [Min(1)] public int timeoutSeconds=30;
     [Header("Capture")]
     public ShelfLocationBridge bridge;
     [Range(1,100)] public int jpegQuality=80;
     [Header("Display")]
     public bool showOverlay=true;
     public bool debugLogging=false;
+    public ShelfInferenceHud hud;
 
     public event Action<ShelfInferenceResponse> ResultReceived;
 
     readonly ShelfInferenceState state=new ShelfInferenceState();
     UnityWebRequest activeRequest;
-    GUIStyle overlayStyle;
-    string displayText="Shelf inference başlatılıyor...";
     string lastWarning;
 
     void Awake() {
@@ -32,16 +31,20 @@ public class ShelfInferenceClient : MonoBehaviour {
         if(bridge==null) {
             Debug.LogError("ShelfInferenceClient requires ShelfLocationBridge on the same GameObject.");
             enabled=false;
+            return;
         }
+        EnsureHud();
     }
 
     void OnEnable() {
+        EnsureHud();
         if(autoStart)StartCoroutine(InferenceLoop());
     }
 
     void OnDisable() {
         if(activeRequest!=null)activeRequest.Abort();
         StopAllCoroutines();
+        if(hud!=null)hud.SetVisible(false);
     }
 
     IEnumerator InferenceLoop() {
@@ -62,7 +65,7 @@ public class ShelfInferenceClient : MonoBehaviour {
                 }
                 if(!ready) {
                     WarnOnce($"Python inference server unavailable at {baseUrl}");
-                    displayText="Python inference server bağlantısı bekleniyor";
+                    ShowStatus("RAF İZLEME", "Python inference server bağlantısı bekleniyor");
                     yield return new WaitForSecondsRealtime(Mathf.Max(.1f,inferenceInterval));
                     continue;
                 }
@@ -98,7 +101,7 @@ public class ShelfInferenceClient : MonoBehaviour {
                         ? "Inference request timed out."
                         : $"Inference isteği başarısız: HTTP {request.responseCode} {request.error}";
                     WarnOnce(message);
-                    displayText="Inference bağlantısı tekrar denenecek";
+                    ShowStatus("RAF İZLEME", "Inference bağlantısı tekrar denenecek");
                 } else {
                     try {
                         var response=ShelfInferenceResponse.Parse(request.downloadHandler.text);
@@ -108,7 +111,7 @@ public class ShelfInferenceClient : MonoBehaviour {
                         ApplyResponse(response);
                     } catch(Exception e) {
                         WarnOnce("Malformed inference response: "+e.Message);
-                        displayText="Inference yanıtı geçersiz";
+                        ShowStatus("RAF İZLEME", "Inference yanıtı geçersiz");
                     }
                 }
             }
@@ -129,12 +132,10 @@ public class ShelfInferenceClient : MonoBehaviour {
             }
             if(displayed==null||(displayed.empty_space_count==0&&shelf.empty_space_count>0))displayed=shelf;
         }
-        if(displayed==null)displayText="Bilinen raf eşleşmesi bekleniyor";
-        else if(displayed.empty_space_count==0)displayText=$"{displayed.shelf_id} — boşluk yok";
-        else {
-            var s=displayed.sections;
-            displayText=$"RAF BOŞLUĞU TESPİT EDİLDİ\n{displayed.shelf_id} — {displayed.empty_space_count} boşluk\nSOL: {s.SOL} | ORTA: {s.ORTA} | SAĞ: {s.SAĞ}";
-        }
+        if(showOverlay) {
+            EnsureHud();
+            hud.ShowResponse(displayed,response);
+        } else if(hud!=null)hud.SetVisible(false);
         if(debugLogging) {
             if(response.debug!=null&&response.debug.debug_only) {
                 Debug.Log($"[ShelfInference Debug] {response.frame_id} | Failure stage: {response.debug.failure_stage} | " +
@@ -153,13 +154,18 @@ public class ShelfInferenceClient : MonoBehaviour {
         Debug.LogWarning("[ShelfInference] "+message);
     }
 
-    void OnGUI() {
+    void EnsureHud() {
         if(!showOverlay)return;
-        if(overlayStyle==null) {
-            overlayStyle=new GUIStyle(GUI.skin.box){fontSize=18,alignment=TextAnchor.MiddleLeft,wordWrap=true};
-            overlayStyle.normal.textColor=Color.white;
-        }
-        GUI.Box(new Rect(Mathf.Max(10,Screen.width-435),15,420,110),displayText,overlayStyle);
+        if(hud==null)hud=GetComponent<ShelfInferenceHud>();
+        if(hud==null)hud=gameObject.AddComponent<ShelfInferenceHud>();
+        hud.Initialize(bridge!=null?bridge.captureCamera:null);
+        hud.SetVisible(true);
+    }
+
+    void ShowStatus(string title,string body) {
+        if(!showOverlay)return;
+        EnsureHud();
+        hud.ShowStatus(title,body,false);
     }
 
     [Serializable]

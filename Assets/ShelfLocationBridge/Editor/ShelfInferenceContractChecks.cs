@@ -7,13 +7,32 @@ using UnityEngine;
 public static class ShelfInferenceContractChecks {
     [MenuItem("Tools/Shelf Location/Run Inference Contract Checks")]
     public static void Run() {
-        const string json="{\"success\":true,\"frame_id\":\"frame_000001\",\"counts\":{},\"shelves\":[{"+
+        const string json="{\"success\":true,\"frame_id\":\"frame_000001\",\"empty_inference_mode\":\"full_frame_gated\",\"image\":{\"width\":1280,\"height\":720},\"counts\":{\"empty_model_predict_calls\":1,\"empty_inference_inputs\":1},\"shelves\":[{"+
             "\"shelf_id\":\"A-L-01\",\"status\":\"NO_EMPTY_SPACE\",\"empty_space_count\":0,"+
+            "\"shelf_index\":0,\"confidence\":0.94,\"model_task\":\"segment\",\"empty_inference_source\":\"full_frame\","+
+            "\"global_bbox_xyxy\":[320,180,960,540],"+
             "\"sections\":{\"SOL\":0,\"ORTA\":0,\"SAĞ\":0},\"detections\":[]}]}";
         var response=ShelfInferenceResponse.Parse(json);
         if(response.shelves.Length!=1||response.shelves[0].shelf_id!="A-L-01"||
-           response.shelves[0].sections.SAĞ!=0)
+           response.shelves[0].sections.SAĞ!=0||response.image.width!=1280||
+           response.empty_inference_mode!="full_frame_gated"||
+           response.shelves[0].empty_inference_source!="full_frame"||
+           response.counts.empty_model_predict_calls!=1||response.counts.empty_inference_inputs!=1)
             throw new Exception("Valid inference response could not be parsed.");
+        if(!DetectionOverlayManager.TryGetNormalizedRect(
+               new[]{320f,180f,960f,540f},1280,720,out Rect normalized)||
+           Mathf.Abs(normalized.xMin-.25f)>.0001f||Mathf.Abs(normalized.yMin-.25f)>.0001f||
+           Mathf.Abs(normalized.xMax-.75f)>.0001f||Mathf.Abs(normalized.yMax-.75f)>.0001f)
+            throw new Exception("Top-left detection coordinates were not normalized correctly.");
+        Rect narrowerDisplay=DetectionOverlayManager.MapCaptureToDisplayAspect(
+            normalized,16f/9f,4f/3f);
+        if(Mathf.Abs(narrowerDisplay.xMin-(1f/6f))>.0001f||
+           Mathf.Abs(narrowerDisplay.xMax-(5f/6f))>.0001f)
+            throw new Exception("Detection coordinates did not adapt to the display aspect ratio.");
+        if(!DetectionOverlayManager.TryGetNormalizedRect(
+               response.shelves[0].global_bbox_xyxy,response.image.width,response.image.height,
+               out Rect shelfNormalized)||shelfNormalized!=normalized)
+            throw new Exception("Shelf and empty overlays do not share the coordinate mapping.");
         var state=new ShelfInferenceState();
         if(!state.Update(response.shelves[0]))throw new Exception("Initial shelf state was not reported.");
         if(state.Update(response.shelves[0]))throw new Exception("Identical shelf state repeated an alert.");
@@ -22,18 +41,20 @@ public static class ShelfInferenceContractChecks {
         response.shelves[0].sections.SOL=1;
         response.shelves[0].sections.SAĞ=1;
         if(!state.Update(response.shelves[0]))throw new Exception("Changed shelf state did not report an alert.");
-        const string positiveJson="{\"success\":true,\"frame_id\":\"frame_000002\",\"counts\":{},\"shelves\":[{"+
+        const string positiveJson="{\"success\":true,\"frame_id\":\"frame_000002\",\"image\":{\"width\":1280,\"height\":720},\"counts\":{},\"shelves\":[{"+
             "\"shelf_id\":\"A-L-01\",\"status\":\"EMPTY_SPACE_DETECTED\",\"empty_space_count\":2,"+
+            "\"shelf_index\":0,\"global_bbox_xyxy\":[0,0,1280,720],"+
             "\"sections\":{\"SOL\":1,\"ORTA\":0,\"SAĞ\":1},"+
             "\"detections\":[{\"confidence\":0.82,\"section\":\"SAĞ\",\"global_bbox_xyxy\":[1,2,3,4]}]}]}";
         var positive=ShelfInferenceResponse.Parse(positiveJson);
         if(positive.shelves[0].sections.SAĞ!=1||positive.shelves[0].detections.Length!=1||
            positive.shelves[0].detections[0].section!="SAĞ")
             throw new Exception("Positive inference response could not be parsed.");
-        const string debugJson="{\"success\":true,\"frame_id\":\"frame_debug\",\"counts\":{},\"debug\":{\"debug_only\":true,"+
+        const string debugJson="{\"success\":true,\"frame_id\":\"frame_debug\",\"image\":{\"width\":1280,\"height\":720},\"counts\":{},\"debug\":{\"debug_only\":true,"+
             "\"failure_stage\":\"none\",\"full_frame_raw\":1,\"full_shelf_roi_raw\":1,\"tile_raw\":0,"+
             "\"production_raw\":1,\"mask_rejected\":0,\"final\":1},"+
             "\"shelves\":[{\"shelf_id\":\"A-L-02\",\"status\":\"NO_EMPTY_SPACE\","+
+            "\"shelf_index\":0,\"global_bbox_xyxy\":[0,0,1280,720],"+
             "\"empty_space_count\":0,\"sections\":{\"SOL\":0,\"ORTA\":0,\"SAĞ\":0},"+
             "\"detections\":[]}]}";
         var debugResponse=ShelfInferenceResponse.Parse(debugJson);

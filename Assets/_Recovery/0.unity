@@ -1414,7 +1414,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: c3d5f36b959947c096772777bfe7e75f, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::ShelfInferenceClient
   serverUrl: http://127.0.0.1:8000
   autoStart: 1
@@ -1436,7 +1436,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 6fc552e7277b3364a9369c001dc6eb67, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::UnitySequenceRecorder
   bridge: {fileID: 403308979}
   captureEveryNFrames: 15

@@ -127,36 +127,46 @@ public class ShelfLocationBridge : MonoBehaviour {
     public FrameInputData BuildFrameMetadata(
         Camera camera, int width, int height, string frameId, string imageName) {
         Transform cameraTransform = camera.transform;
-        float fx = Mathf.Abs(camera.projectionMatrix[0, 0]) * width * .5f;
-        float fy = Mathf.Abs(camera.projectionMatrix[1, 1]) * height * .5f;
-        Matrix4x4 gpu = GL.GetGPUProjectionMatrix(camera.projectionMatrix, true);
-        return new FrameInputData {
-            store_id = storeId,
-            session_id = sessionId,
-            frame_id = frameId,
-            image_path = imageName,
-            timestamp = Time.realtimeSinceStartupAsDouble,
-            image = new ImageMetadata { width = width, height = height },
-            pose = new PoseMetadata {
-                quality = simulatedPoseQuality,
-                relocalized = relocalized,
-                scale_initialized = scaleInitialized
-            },
-            camera = new CameraMetadata {
-                position_map = V(cameraTransform.position),
-                rotation_xyzw = new[] {
-                    cameraTransform.rotation.x, cameraTransform.rotation.y,
-                    cameraTransform.rotation.z, cameraTransform.rotation.w
+        float previousAspect = camera.aspect;
+        try {
+            // The metadata projection must describe the off-screen inference image,
+            // even when the Game view uses another aspect ratio.
+            camera.aspect = (float)width / height;
+            float fx = Mathf.Abs(camera.projectionMatrix[0, 0]) * width * .5f;
+            float fy = Mathf.Abs(camera.projectionMatrix[1, 1]) * height * .5f;
+            Matrix4x4 gpu = GL.GetGPUProjectionMatrix(camera.projectionMatrix, true);
+            return new FrameInputData {
+                store_id = storeId,
+                session_id = sessionId,
+                frame_id = frameId,
+                image_path = imageName,
+                timestamp = Time.realtimeSinceStartupAsDouble,
+                image = new ImageMetadata { width = width, height = height },
+                pose = new PoseMetadata {
+                    quality = simulatedPoseQuality,
+                    relocalized = relocalized,
+                    scale_initialized = scaleInitialized
                 },
-                intrinsics = new CameraIntrinsics { fx = fx, fy = fy, cx = width * .5f, cy = height * .5f },
-                vertical_fov = camera.fieldOfView,
-                near_clip = camera.nearClipPlane,
-                far_clip = camera.farClipPlane,
-                world_to_camera_matrix = M(camera.worldToCameraMatrix),
-                projection_matrix = M(camera.projectionMatrix),
-                gpu_projection_matrix = M(gpu)
-            }
-        };
+                camera = new CameraMetadata {
+                    position_map = V(cameraTransform.position),
+                    rotation_xyzw = new[] {
+                        cameraTransform.rotation.x, cameraTransform.rotation.y,
+                        cameraTransform.rotation.z, cameraTransform.rotation.w
+                    },
+                    intrinsics = new CameraIntrinsics {
+                        fx = fx, fy = fy, cx = width * .5f, cy = height * .5f
+                    },
+                    vertical_fov = camera.fieldOfView,
+                    near_clip = camera.nearClipPlane,
+                    far_clip = camera.farClipPlane,
+                    world_to_camera_matrix = M(camera.worldToCameraMatrix),
+                    projection_matrix = M(camera.projectionMatrix),
+                    gpu_projection_matrix = M(gpu)
+                }
+            };
+        } finally {
+            camera.aspect = previousAspect;
+        }
     }
 
     Camera ResolveCamera() {

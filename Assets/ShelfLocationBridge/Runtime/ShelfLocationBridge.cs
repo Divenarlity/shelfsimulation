@@ -52,6 +52,9 @@ public class ShelfLocationBridge : MonoBehaviour {
     [Range(0, 1)] public float simulatedPoseQuality = 1;
     public bool relocalized = true, scaleInitialized = true;
 
+    [Header("Diagnostics")]
+    public bool logCameraState;
+
     public string DataRoot => Path.Combine(
         Directory.GetParent(Application.dataPath).FullName, "ShelfSystemData");
 
@@ -124,18 +127,54 @@ public class ShelfLocationBridge : MonoBehaviour {
     static void AppendVector(StringBuilder json, float[] value) =>
         json.Append($"[{F(value[0])}, {F(value[1])}, {F(value[2])}]");
 
+    void Awake() {
+        LogCameraState("Awake");
+        if (logCameraState) StartCoroutine(LogCameraAtEndOfFirstFrame());
+    }
+
+    IEnumerator LogCameraAtEndOfFirstFrame() {
+        yield return new WaitForEndOfFrame();
+        LogCameraState("EndOfFirstFrame");
+    }
+
+    public void LogCameraState(string stage) {
+        if (!logCameraState) return;
+        Camera camera = captureCamera != null ? captureCamera : Camera.main;
+        if (camera == null) {
+            Debug.LogWarning($"[ShelfCameraState] {stage}: capture camera is missing.");
+            return;
+        }
+        Debug.Log(
+            $"[ShelfCameraState] {stage} | position={camera.transform.position:F5} | " +
+            $"rotation={camera.transform.rotation.eulerAngles:F5} | rect={camera.rect} | " +
+            $"aspect={camera.aspect:F6} | target=" +
+            $"{(camera.targetTexture != null ? camera.targetTexture.name : "null")} | " +
+            $"projection={camera.projectionMatrix}");
+    }
+
+    static Matrix4x4 ProjectionForFrame(Camera camera, float aspect) {
+        if (camera.orthographic) {
+            float halfHeight = camera.orthographicSize;
+            float halfWidth = halfHeight * aspect;
+            return Matrix4x4.Ortho(
+                -halfWidth, halfWidth, -halfHeight, halfHeight,
+                camera.nearClipPlane, camera.farClipPlane);
+        }
+        return Matrix4x4.Perspective(
+            camera.fieldOfView, aspect, camera.nearClipPlane, camera.farClipPlane);
+    }
+
     public FrameInputData BuildFrameMetadata(
         Camera camera, int width, int height, string frameId, string imageName) {
         Transform cameraTransform = camera.transform;
-        float previousAspect = camera.aspect;
-        try {
-            // The metadata projection must describe the off-screen inference image,
-            // even when the Game view uses another aspect ratio.
-            camera.aspect = (float)width / height;
-            float fx = Mathf.Abs(camera.projectionMatrix[0, 0]) * width * .5f;
-            float fy = Mathf.Abs(camera.projectionMatrix[1, 1]) * height * .5f;
-            Matrix4x4 gpu = GL.GetGPUProjectionMatrix(camera.projectionMatrix, true);
-            return new FrameInputData {
+        float frameAspect = (float)width / height;
+        // Metadata describes the off-screen inference image. Construct its projection
+        // independently so reading metadata never mutates the visible Camera.
+        Matrix4x4 projection = ProjectionForFrame(camera, frameAspect);
+        float fx = Mathf.Abs(projection[0, 0]) * width * .5f;
+        float fy = Mathf.Abs(projection[1, 1]) * height * .5f;
+        Matrix4x4 gpu = GL.GetGPUProjectionMatrix(projection, true);
+        return new FrameInputData {
                 store_id = storeId,
                 session_id = sessionId,
                 frame_id = frameId,
@@ -160,13 +199,10 @@ public class ShelfLocationBridge : MonoBehaviour {
                     near_clip = camera.nearClipPlane,
                     far_clip = camera.farClipPlane,
                     world_to_camera_matrix = M(camera.worldToCameraMatrix),
-                    projection_matrix = M(camera.projectionMatrix),
+                    projection_matrix = M(projection),
                     gpu_projection_matrix = M(gpu)
                 }
             };
-        } finally {
-            camera.aspect = previousAspect;
-        }
     }
 
     Camera ResolveCamera() {
@@ -183,31 +219,44 @@ public class ShelfLocationBridge : MonoBehaviour {
         RenderTexture previousActive = RenderTexture.active;
         RenderTexture previousTarget = camera.targetTexture;
         float previousAspect = camera.aspect;
+        Rect previousRect = camera.rect;
         Texture2D raw = null;
         try {
+            LogCameraState("BeforeCaptureTopLeftTexture");
+            // Render the complete camera view into the inference target. The scene's
+            // configured viewport is restored below and is used only for display.
+            camera.rect = new Rect(0f, 0f, 1f, 1f);
             camera.aspect = (float)captureWidth / captureHeight;
             camera.targetTexture = target;
+            LogCameraState("BeforeCameraRender");
             camera.Render();
+            LogCameraState("AfterCameraRender");
             RenderTexture.active = target;
             raw = new Texture2D(captureWidth, captureHeight, TextureFormat.RGB24, false);
             raw.ReadPixels(new Rect(0, 0, captureWidth, captureHeight), 0, 0);
             raw.Apply();
-            Color32[] source = raw.GetPixels32();
-            var topLeft = new Color32[source.Length];
-            for (int row = 0; row < captureHeight; row++)
-                Array.Copy(source, row * captureWidth, topLeft,
-                           (captureHeight - 1 - row) * captureWidth, captureWidth);
-            var result = new Texture2D(captureWidth, captureHeight, TextureFormat.RGB24, false);
-            result.SetPixels32(topLeft);
-            result.Apply();
+            // ReadPixels and Unity's image encoders share Texture2D's bottom-left
+            // storage convention. EncodeToJPG writes the visually upright image;
+            // reversing the rows here inverted the JPEG received by Python.
+            // OpenCV then exposes that JPEG as the required top-left-origin array.
+            Texture2D result = raw;
+            raw = null;
             return result;
         } finally {
             camera.targetTexture = previousTarget;
             camera.aspect = previousAspect;
+            camera.rect = previousRect;
             RenderTexture.active = previousActive;
             RenderTexture.ReleaseTemporary(target);
-            if (raw != null) Destroy(raw);
+            DestroyOwnedTexture(raw);
+            LogCameraState("AfterCaptureTopLeftTexture");
         }
+    }
+
+    static void DestroyOwnedTexture(Texture2D texture) {
+        if (texture == null) return;
+        if (Application.isPlaying) Destroy(texture);
+        else DestroyImmediate(texture);
     }
 
     public byte[] CaptureRuntimeJpeg(int quality, out FrameInputData metadata) {
@@ -219,7 +268,7 @@ public class ShelfLocationBridge : MonoBehaviour {
                 camera, captureWidth, captureHeight, frameId, $"{frameId}.jpg");
             return texture.EncodeToJPG(Mathf.Clamp(quality, 1, 100));
         } finally {
-            Destroy(texture);
+            DestroyOwnedTexture(texture);
         }
     }
 
@@ -239,7 +288,7 @@ public class ShelfLocationBridge : MonoBehaviour {
         try {
             File.WriteAllBytes(Path.Combine(inputRoot, imageName), texture.EncodeToPNG());
         } finally {
-            Destroy(texture);
+            DestroyOwnedTexture(texture);
         }
         FrameInputData metadata = BuildFrameMetadata(
             camera, captureWidth, captureHeight, frameId, imageName);

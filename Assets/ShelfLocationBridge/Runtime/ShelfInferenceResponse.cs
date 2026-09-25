@@ -11,17 +11,31 @@ public class ShelfInferenceSections {
 public class ShelfInferenceDetection {
     public int assigned_shelf_index, class_id;
     public float confidence;
-    public string section, assigned_shelf_id, region_id, class_name, inference_source;
+    public string section, assigned_shelf_id, parent_shelf_id, shelf_level_id;
+    public string region_id, class_name, inference_source;
     public float[] global_bbox_xyxy;
+}
+
+[Serializable]
+public class ShelfPolygonPoint {
+    public float x, y;
 }
 
 [Serializable]
 public class ShelfInferenceCounts {
     public int visible_candidates, segmented_shelves, detected_shelves, matched_shelves, unknown_shelves;
+    public int matched_parent_regions;
     public int roi_inferences, raw_empty_predictions, mask_rejected;
     public int duplicates_removed, final_empty_spaces;
     public int shelf_rois_selected, shelf_rois_limited;
     public int empty_inference_calls, empty_model_predict_calls, empty_inference_inputs;
+}
+
+[Serializable]
+public class ShelfInferenceTiming {
+    public float shelf_inference_ms, empty_batch_inference_ms, parent_association_ms;
+    public float empty_association_ms, association_ms;
+    public float visualization_render_ms, total_pipeline_ms, visualization_encode_ms;
 }
 
 [Serializable]
@@ -34,11 +48,13 @@ public class ShelfInferenceDebug {
 
 [Serializable]
 public class ShelfInferenceShelf {
-    public string shelf_id, status, empty_roi_mode, model_task, empty_inference_source;
+    public string shelf_id, parent_shelf_id, shelf_level_id;
+    public string status, empty_roi_mode, model_task, empty_inference_source;
     public float confidence, segmentation_confidence, mapping_confidence;
-    public int shelf_index, empty_space_count;
+    public int shelf_index, level_number, empty_space_count;
     public bool empty_inference_selected;
     public float[] bbox_xyxy, global_bbox_xyxy, roi_bbox_xyxy;
+    public ShelfPolygonPoint[] mask_polygon;
     public ShelfInferenceSections sections;
     public ShelfInferenceDetection[] detections;
 }
@@ -46,9 +62,10 @@ public class ShelfInferenceShelf {
 [Serializable]
 public class ShelfInferenceResponse {
     public bool success;
-    public string frame_id, strategy, empty_inference_mode, empty_roi_mode;
+    public string frame_id, strategy, empty_inference_mode, empty_roi_mode, visualization_url;
     public ImageMetadata image;
     public ShelfInferenceCounts counts;
+    public ShelfInferenceTiming timing;
     public ShelfInferenceShelf[] shelves;
     public ShelfInferenceDebug debug;
 

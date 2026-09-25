@@ -15,6 +15,7 @@ public class DetectionOverlayManager : MonoBehaviour {
     static readonly Color EmptyColor = new(1f, .04f, .06f, 1f);
     static readonly Color EmptyFill = new(1f, .05f, .05f, .07f);
 
+    readonly List<ShelfPolygonOverlayView> shelfPolygons = new();
     readonly List<OverlayBoxView> shelfBoxes = new();
     readonly List<OverlayBoxView> emptyBoxes = new();
     RectTransform viewport, shelfLayer, emptyLayer;
@@ -65,21 +66,32 @@ public class DetectionOverlayManager : MonoBehaviour {
             return;
         }
 
-        int shelfIndex = 0;
+        int shelfPolygonIndex = 0;
+        int shelfBoxIndex = 0;
         int emptyIndex = 0;
         foreach (ShelfInferenceShelf shelf in response.shelves ?? Array.Empty<ShelfInferenceShelf>()) {
-            if (shelf == null || !TryMapRect(
-                    shelf.global_bbox_xyxy, response.image, out Rect shelfRect)) continue;
-            OverlayBoxView shelfBox = GetBox(
-                shelfBoxes, shelfLayer, shelfIndex++, "ShelfBox", ShelfColor, ShelfFill,
-                ShelfBorderThickness, 190f);
+            if (shelf == null) continue;
             string shelfName = shelf.shelf_id == "UNKNOWN_SHELF"
                 ? $"RAF {shelf.shelf_index + 1}"
                 : shelf.shelf_id;
             string shelfLabel = shelf.confidence > 0f
                 ? $"{shelfName}  %{Mathf.RoundToInt(Mathf.Clamp01(shelf.confidence) * 100f)}"
                 : shelfName;
-            shelfBox.Set(shelfRect, shelfLabel);
+
+            if (UsesPolygonVisualization(shelf)) {
+                if (TryMapPolygon(
+                        shelf.mask_polygon, response.image.width, response.image.height,
+                        DisplayAspect, out Vector2[] polygon)) {
+                    ShelfPolygonOverlayView shelfPolygon = GetPolygon(shelfPolygonIndex++);
+                    shelfPolygon.Set(polygon, shelfLabel);
+                }
+            } else if (TryMapRect(
+                           shelf.global_bbox_xyxy, response.image, out Rect shelfRect)) {
+                OverlayBoxView shelfBox = GetBox(
+                    shelfBoxes, shelfLayer, shelfBoxIndex++, "ShelfBox", ShelfColor, ShelfFill,
+                    ShelfBorderThickness, 190f);
+                shelfBox.Set(shelfRect, shelfLabel);
+            }
 
             foreach (ShelfInferenceDetection detection in
                      shelf.detections ?? Array.Empty<ShelfInferenceDetection>()) {
@@ -95,9 +107,14 @@ public class DetectionOverlayManager : MonoBehaviour {
             }
         }
 
-        HideUnused(shelfBoxes, shelfIndex);
+        HideUnused(shelfPolygons, shelfPolygonIndex);
+        HideUnused(shelfBoxes, shelfBoxIndex);
         HideUnused(emptyBoxes, emptyIndex);
     }
+
+    float DisplayAspect => displayCamera != null
+        ? displayCamera.aspect
+        : (float)Screen.width / Mathf.Max(1, Screen.height);
 
     bool TryMapRect(float[] bbox, ImageMetadata image, out Rect mapped) {
         mapped = default;
@@ -106,8 +123,7 @@ public class DetectionOverlayManager : MonoBehaviour {
         mapped = MapCaptureToDisplayAspect(
             normalized,
             (float)image.width / image.height,
-            displayCamera != null ? displayCamera.aspect :
-            (float)Screen.width / Mathf.Max(1, Screen.height));
+            DisplayAspect);
         if (mapped.xMax <= 0f || mapped.xMin >= 1f) return false;
         mapped.xMin = Mathf.Clamp01(mapped.xMin);
         mapped.xMax = Mathf.Clamp01(mapped.xMax);
@@ -115,8 +131,21 @@ public class DetectionOverlayManager : MonoBehaviour {
     }
 
     public void Clear() {
+        HideUnused(shelfPolygons, 0);
         HideUnused(shelfBoxes, 0);
         HideUnused(emptyBoxes, 0);
+    }
+
+    ShelfPolygonOverlayView GetPolygon(int index) {
+        if (index < shelfPolygons.Count) {
+            shelfPolygons[index].SetActive(true);
+            return shelfPolygons[index];
+        }
+        var polygon = new ShelfPolygonOverlayView(
+            shelfLayer, font, $"ShelfPolygon_{shelfPolygons.Count + 1}", ShelfColor,
+            ShelfBorderThickness, 190f);
+        shelfPolygons.Add(polygon);
+        return polygon;
     }
 
     OverlayBoxView GetBox(
@@ -132,8 +161,55 @@ public class DetectionOverlayManager : MonoBehaviour {
         return box;
     }
 
-    static void HideUnused(List<OverlayBoxView> pool, int firstUnused) {
+    static void HideUnused<T>(List<T> pool, int firstUnused) where T : IOverlayView {
         for (int i = firstUnused; i < pool.Count; i++) pool[i].SetActive(false);
+    }
+
+    public static bool UsesPolygonVisualization(ShelfInferenceShelf shelf) {
+        if (shelf == null || shelf.model_task != "segment" ||
+            shelf.mask_polygon == null || shelf.mask_polygon.Length < 3) return false;
+        double twiceArea = 0;
+        for (int i = 0; i < shelf.mask_polygon.Length; i++) {
+            ShelfPolygonPoint current = shelf.mask_polygon[i];
+            ShelfPolygonPoint next = shelf.mask_polygon[(i + 1) % shelf.mask_polygon.Length];
+            if (!IsFinite(current) || !IsFinite(next)) return false;
+            twiceArea += (double)current.x * next.y - (double)next.x * current.y;
+        }
+        return Math.Abs(twiceArea) > .001;
+    }
+
+    static bool IsFinite(ShelfPolygonPoint point) =>
+        point != null && !float.IsNaN(point.x) && !float.IsInfinity(point.x) &&
+        !float.IsNaN(point.y) && !float.IsInfinity(point.y);
+
+    public static bool TryMapPolygon(
+        ShelfPolygonPoint[] polygon, int imageWidth, int imageHeight, float displayAspect,
+        out Vector2[] mapped) {
+        mapped = null;
+        if (polygon == null || polygon.Length < 3 || imageWidth <= 0 || imageHeight <= 0 ||
+            displayAspect <= 0f) return false;
+        float captureAspect = (float)imageWidth / imageHeight;
+        var points = new Vector2[polygon.Length];
+        for (int i = 0; i < polygon.Length; i++) {
+            if (!IsFinite(polygon[i]) || !TryGetNormalizedPoint(
+                    polygon[i].x, polygon[i].y, imageWidth, imageHeight,
+                    out Vector2 normalized)) return false;
+            points[i] = MapCaptureToDisplayAspect(normalized, captureAspect, displayAspect);
+            points[i].x = Mathf.Clamp01(points[i].x);
+        }
+        mapped = points;
+        return true;
+    }
+
+    public static bool TryGetNormalizedPoint(
+        float x, float y, int imageWidth, int imageHeight, out Vector2 normalized) {
+        normalized = default;
+        if (imageWidth <= 0 || imageHeight <= 0 || float.IsNaN(x) || float.IsInfinity(x) ||
+            float.IsNaN(y) || float.IsInfinity(y)) return false;
+        normalized = new Vector2(
+            Mathf.Clamp(x, 0f, imageWidth) / imageWidth,
+            1f - Mathf.Clamp(y, 0f, imageHeight) / imageHeight);
+        return true;
     }
 
     public static bool TryGetNormalizedRect(
@@ -149,22 +225,100 @@ public class DetectionOverlayManager : MonoBehaviour {
         float x2 = Mathf.Clamp(bbox[2], 0f, imageWidth);
         float y2 = Mathf.Clamp(bbox[3], 0f, imageHeight);
         if (x2 <= x1 || y2 <= y1) return false;
-        normalized = Rect.MinMaxRect(
-            x1 / imageWidth, 1f - y2 / imageHeight,
-            x2 / imageWidth, 1f - y1 / imageHeight);
-        return true;
+        if (!TryGetNormalizedPoint(
+                x1, y1, imageWidth, imageHeight, out Vector2 topLeft) ||
+            !TryGetNormalizedPoint(
+                x2, y2, imageWidth, imageHeight, out Vector2 bottomRight)) return false;
+        normalized = Rect.MinMaxRect(topLeft.x, bottomRight.y, bottomRight.x, topLeft.y);
+        return normalized.width > 0f && normalized.height > 0f;
+    }
+
+    public static Vector2 MapCaptureToDisplayAspect(
+        Vector2 normalized, float captureAspect, float displayAspect) {
+        if (captureAspect <= 0f || displayAspect <= 0f) return normalized;
+        normalized.x = .5f + (normalized.x - .5f) * captureAspect / displayAspect;
+        return normalized;
     }
 
     public static Rect MapCaptureToDisplayAspect(
         Rect normalized, float captureAspect, float displayAspect) {
         if (captureAspect <= 0f || displayAspect <= 0f) return normalized;
-        float ratio = captureAspect / displayAspect;
-        normalized.xMin = .5f + (normalized.xMin - .5f) * ratio;
-        normalized.xMax = .5f + (normalized.xMax - .5f) * ratio;
+        Vector2 min = MapCaptureToDisplayAspect(normalized.min, captureAspect, displayAspect);
+        Vector2 max = MapCaptureToDisplayAspect(normalized.max, captureAspect, displayAspect);
+        normalized.xMin = min.x;
+        normalized.xMax = max.x;
         return normalized;
     }
 
-    sealed class OverlayBoxView {
+    interface IOverlayView {
+        void SetActive(bool active);
+    }
+
+    sealed class ShelfPolygonOverlayView : IOverlayView {
+        readonly GameObject rootObject;
+        readonly ShelfPolygonGraphic graphic;
+        readonly RectTransform labelRect;
+        readonly Text label;
+
+        public ShelfPolygonOverlayView(
+            RectTransform parent, Font font, string name, Color color,
+            float borderThickness, float labelWidth) {
+            rootObject = new GameObject(name, typeof(RectTransform), typeof(ShelfPolygonGraphic));
+            RectTransform root = rootObject.GetComponent<RectTransform>();
+            root.SetParent(parent, false);
+            root.anchorMin = Vector2.zero;
+            root.anchorMax = Vector2.one;
+            root.offsetMin = Vector2.zero;
+            root.offsetMax = Vector2.zero;
+            graphic = rootObject.GetComponent<ShelfPolygonGraphic>();
+            graphic.color = color;
+            graphic.raycastTarget = false;
+
+            var labelObject = new GameObject("Label", typeof(RectTransform), typeof(Image));
+            labelRect = labelObject.GetComponent<RectTransform>();
+            labelRect.SetParent(root, false);
+            labelRect.pivot = new Vector2(0f, 0f);
+            labelRect.sizeDelta = new Vector2(labelWidth, 31f);
+            Image labelBackground = labelObject.GetComponent<Image>();
+            labelBackground.color = new Color(color.r, color.g, color.b, .94f);
+            labelBackground.raycastTarget = false;
+
+            var textObject = new GameObject("Text", typeof(RectTransform), typeof(Text));
+            RectTransform textRect = textObject.GetComponent<RectTransform>();
+            textRect.SetParent(labelRect, false);
+            textRect.anchorMin = Vector2.zero;
+            textRect.anchorMax = Vector2.one;
+            textRect.offsetMin = new Vector2(5f, 0f);
+            textRect.offsetMax = new Vector2(-5f, 0f);
+            label = textObject.GetComponent<Text>();
+            label.font = font;
+            label.fontSize = 20;
+            label.fontStyle = FontStyle.Bold;
+            label.alignment = TextAnchor.MiddleCenter;
+            label.color = Color.white;
+            label.raycastTarget = false;
+
+            graphic.SetPoints(Array.Empty<Vector2>(), borderThickness);
+        }
+
+        public void Set(Vector2[] points, string text) {
+            float left = points[0].x;
+            float top = points[0].y;
+            for (int i = 1; i < points.Length; i++) {
+                left = Mathf.Min(left, points[i].x);
+                top = Mathf.Max(top, points[i].y);
+            }
+            labelRect.anchorMin = labelRect.anchorMax = new Vector2(left, top);
+            labelRect.anchoredPosition = new Vector2(0f, 5f);
+            label.text = text;
+            graphic.SetPoints(points, ShelfBorderThickness);
+            SetActive(true);
+        }
+
+        public void SetActive(bool active) => rootObject.SetActive(active);
+    }
+
+    sealed class OverlayBoxView : IOverlayView {
         readonly GameObject rootObject;
         readonly RectTransform root;
         readonly Text label;

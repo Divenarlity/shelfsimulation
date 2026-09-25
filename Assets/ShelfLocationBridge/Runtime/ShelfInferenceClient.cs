@@ -4,6 +4,11 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Networking;
 
+public enum ShelfVisualizationMode {
+    PythonAnnotatedFrame,
+    UnityGeometryOverlay
+}
+
 [RequireComponent(typeof(ShelfLocationBridge))]
 public class ShelfInferenceClient : MonoBehaviour {
     [Header("Connection")]
@@ -17,6 +22,7 @@ public class ShelfInferenceClient : MonoBehaviour {
     [Range(1,100)] public int jpegQuality=80;
     [Header("Display")]
     public bool showOverlay=true;
+    public ShelfVisualizationMode visualizationMode=ShelfVisualizationMode.PythonAnnotatedFrame;
     public bool debugLogging=false;
     public ShelfInferenceHud hud;
 
@@ -25,6 +31,7 @@ public class ShelfInferenceClient : MonoBehaviour {
     readonly ShelfInferenceState state=new ShelfInferenceState();
     UnityWebRequest activeRequest;
     string lastWarning;
+    string lastVisualizationWarning;
 
     void Awake() {
         if(bridge==null)bridge=GetComponent<ShelfLocationBridge>();
@@ -44,7 +51,10 @@ public class ShelfInferenceClient : MonoBehaviour {
     void OnDisable() {
         if(activeRequest!=null)activeRequest.Abort();
         StopAllCoroutines();
-        if(hud!=null)hud.SetVisible(false);
+        if(hud!=null) {
+            hud.ClearVisualization();
+            hud.SetVisible(false);
+        }
     }
 
     IEnumerator InferenceLoop() {
@@ -77,6 +87,7 @@ public class ShelfInferenceClient : MonoBehaviour {
             FrameInputData metadata=null;
             try {
                 jpeg=bridge.CaptureRuntimeJpeg(jpegQuality,out metadata);
+                bridge.LogCameraState("AfterCaptureTopLeftTextureReturns");
             } catch(Exception e) {
                 WarnOnce("Kamera yakalama hatası: "+e.Message);
             }
@@ -89,6 +100,7 @@ public class ShelfInferenceClient : MonoBehaviour {
                 new MultipartFormFileSection("image",jpeg,metadata.image_path,"image/jpeg"),
                 new MultipartFormDataSection("metadata",JsonUtility.ToJson(metadata))
             };
+            ShelfInferenceResponse response=null;
             using(var request=UnityWebRequest.Post(baseUrl+"/infer",form)) {
                 activeRequest=request;
                 request.timeout=Mathf.Max(1,timeoutSeconds);
@@ -104,16 +116,47 @@ public class ShelfInferenceClient : MonoBehaviour {
                     ShowStatus("RAF İZLEME", "Inference bağlantısı tekrar denenecek");
                 } else {
                     try {
-                        var response=ShelfInferenceResponse.Parse(request.downloadHandler.text);
+                        response=ShelfInferenceResponse.Parse(request.downloadHandler.text);
                         if(response.frame_id!=metadata.frame_id)
                             throw new FormatException("Inference frame_id gönderilen kareyle uyuşmuyor.");
                         lastWarning=null;
-                        ApplyResponse(response);
                     } catch(Exception e) {
+                        response=null;
                         WarnOnce("Malformed inference response: "+e.Message);
                         ShowStatus("RAF İZLEME", "Inference yanıtı geçersiz");
                     }
                 }
+            }
+            if(response!=null) {
+                if(showOverlay&&visualizationMode==ShelfVisualizationMode.PythonAnnotatedFrame) {
+                    EnsureHud();
+                    hud.PrepareVisualizationFrame(response.frame_id);
+                    if(TryResolveVisualizationUrl(baseUrl,response.visualization_url,out string imageUrl)) {
+                        using(var imageRequest=UnityWebRequest.Get(imageUrl)) {
+                            activeRequest=imageRequest;
+                            imageRequest.timeout=Mathf.Max(1,timeoutSeconds);
+                            yield return imageRequest.SendWebRequest();
+                            activeRequest=null;
+                            if(imageRequest.result==UnityWebRequest.Result.Success) {
+                                bridge.LogCameraState("AfterVisualizationDownload");
+                                var texture=new Texture2D(2,2,TextureFormat.RGB24,false);
+                                if(texture.LoadImage(imageRequest.downloadHandler.data,true)&&
+                                   hud.TryShowVisualization(
+                                       response.frame_id,texture,response.image.width,response.image.height)) {
+                                    bridge.LogCameraState("AfterRawImageUpdated");
+                                    lastVisualizationWarning=null;
+                                } else {
+                                    Destroy(texture);
+                                    VisualizationWarning("Visualization image could not be decoded.");
+                                }
+                            } else {
+                                VisualizationWarning(
+                                    $"Visualization download failed: HTTP {imageRequest.responseCode} {imageRequest.error}");
+                            }
+                        }
+                    } else VisualizationWarning("Inference response has no valid visualization URL.");
+                }
+                ApplyResponse(response);
             }
             yield return new WaitForSecondsRealtime(Mathf.Max(.1f,inferenceInterval));
         }
@@ -123,14 +166,16 @@ public class ShelfInferenceClient : MonoBehaviour {
         ShelfInferenceShelf displayed=null;
         foreach(var shelf in response.shelves) {
             if(shelf.shelf_id=="UNKNOWN_SHELF")continue;
+            string displayId=!string.IsNullOrWhiteSpace(shelf.shelf_level_id)
+                ? shelf.shelf_level_id:shelf.shelf_id;
             if(state.Update(shelf)) {
                 if(shelf.empty_space_count>0) {
-                    Debug.Log($"[ShelfInference] {shelf.shelf_id} | {shelf.empty_space_count} boşluk");
+                    Debug.Log($"[ShelfInference] {displayId} | {shelf.empty_space_count} boşluk");
                     foreach(var detection in shelf.detections??Array.Empty<ShelfInferenceDetection>())
-                        Debug.Log($"[ShelfInference] {shelf.shelf_id} rafının {detection.section} bölümünde boşluk var.");
-                } else Debug.Log($"[ShelfInference] {shelf.shelf_id} | Boşluk yok");
+                        Debug.Log($"[ShelfInference] {displayId} rafının {detection.section} bölümünde boşluk var.");
+                } else Debug.Log($"[ShelfInference] {displayId} | Boşluk yok");
             }
-            if(displayed==null||(displayed.empty_space_count==0&&shelf.empty_space_count>0))displayed=shelf;
+            if(ShouldPreferShelf(shelf,displayed))displayed=shelf;
         }
         if(showOverlay) {
             EnsureHud();
@@ -148,10 +193,48 @@ public class ShelfInferenceClient : MonoBehaviour {
         ResultReceived?.Invoke(response);
     }
 
+    public static bool ShouldPreferShelf(ShelfInferenceShelf candidate,ShelfInferenceShelf current) {
+        if(candidate==null)return false;
+        if(current==null)return true;
+        bool candidateGap=candidate.empty_space_count>0;
+        bool currentGap=current.empty_space_count>0;
+        if(candidateGap!=currentGap)return candidateGap;
+        string candidateParent=candidate.parent_shelf_id??candidate.shelf_id??string.Empty;
+        string currentParent=current.parent_shelf_id??current.shelf_id??string.Empty;
+        int parentOrder=string.CompareOrdinal(candidateParent,currentParent);
+        if(parentOrder!=0)return parentOrder<0;
+        int candidateLevel=candidate.level_number>0?candidate.level_number:int.MaxValue;
+        int currentLevel=current.level_number>0?current.level_number:int.MaxValue;
+        if(candidateLevel!=currentLevel)return candidateLevel<currentLevel;
+        return string.CompareOrdinal(candidate.shelf_id,current.shelf_id)<0;
+    }
+
     void WarnOnce(string message) {
         if(message==lastWarning)return;
         lastWarning=message;
         Debug.LogWarning("[ShelfInference] "+message);
+    }
+
+    void VisualizationWarning(string message) {
+        if(message==lastVisualizationWarning)return;
+        lastVisualizationWarning=message;
+        Debug.LogWarning("[ShelfInference] "+message);
+    }
+
+    public static bool TryResolveVisualizationUrl(
+        string serverBaseUrl,string visualizationPath,out string resolvedUrl) {
+        resolvedUrl=null;
+        if(string.IsNullOrWhiteSpace(serverBaseUrl)||
+           string.IsNullOrWhiteSpace(visualizationPath)||
+           !visualizationPath.StartsWith("/visualization/",StringComparison.Ordinal)||
+           !visualizationPath.EndsWith(".jpg",StringComparison.OrdinalIgnoreCase)||
+           visualizationPath.Contains(".."))return false;
+        if(!Uri.TryCreate(serverBaseUrl.TrimEnd('/')+"/",UriKind.Absolute,out Uri baseUri)||
+           !Uri.TryCreate(baseUri,visualizationPath,out Uri resolved)||
+           resolved.Scheme!=baseUri.Scheme||resolved.Host!=baseUri.Host||resolved.Port!=baseUri.Port)
+            return false;
+        resolvedUrl=resolved.AbsoluteUri;
+        return true;
     }
 
     void EnsureHud() {
@@ -159,6 +242,7 @@ public class ShelfInferenceClient : MonoBehaviour {
         if(hud==null)hud=GetComponent<ShelfInferenceHud>();
         if(hud==null)hud=gameObject.AddComponent<ShelfInferenceHud>();
         hud.Initialize(bridge!=null?bridge.captureCamera:null);
+        hud.SetVisualizationMode(visualizationMode);
         hud.SetVisible(true);
     }
 

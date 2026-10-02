@@ -55,6 +55,8 @@ public class ShelfLocationBridge : MonoBehaviour {
     [Header("Diagnostics")]
     public bool logCameraState;
 
+    int runtimeCaptureSequence;
+
     public string DataRoot => Path.Combine(
         Directory.GetParent(Application.dataPath).FullName, "ShelfSystemData");
 
@@ -138,8 +140,11 @@ public class ShelfLocationBridge : MonoBehaviour {
     }
 
     public void LogCameraState(string stage) {
+        LogCameraState(stage, captureCamera != null ? captureCamera : Camera.main);
+    }
+
+    public void LogCameraState(string stage, Camera camera) {
         if (!logCameraState) return;
-        Camera camera = captureCamera != null ? captureCamera : Camera.main;
         if (camera == null) {
             Debug.LogWarning($"[ShelfCameraState] {stage}: capture camera is missing.");
             return;
@@ -218,38 +223,38 @@ public class ShelfLocationBridge : MonoBehaviour {
             captureWidth, captureHeight, 24, RenderTextureFormat.ARGB32);
         RenderTexture previousActive = RenderTexture.active;
         RenderTexture previousTarget = camera.targetTexture;
+        int previousTargetDisplay = camera.targetDisplay;
         float previousAspect = camera.aspect;
         Rect previousRect = camera.rect;
         Texture2D raw = null;
         try {
-            LogCameraState("BeforeCaptureTopLeftTexture");
+            LogCameraState("BeforeCaptureTopLeftTexture", camera);
             // Render the complete camera view into the inference target. The scene's
             // configured viewport is restored below and is used only for display.
             camera.rect = new Rect(0f, 0f, 1f, 1f);
             camera.aspect = (float)captureWidth / captureHeight;
             camera.targetTexture = target;
-            LogCameraState("BeforeCameraRender");
+            LogCameraState("BeforeCameraRender", camera);
             camera.Render();
-            LogCameraState("AfterCameraRender");
+            LogCameraState("AfterCameraRender", camera);
             RenderTexture.active = target;
             raw = new Texture2D(captureWidth, captureHeight, TextureFormat.RGB24, false);
             raw.ReadPixels(new Rect(0, 0, captureWidth, captureHeight), 0, 0);
             raw.Apply();
-            // ReadPixels and Unity's image encoders share Texture2D's bottom-left
-            // storage convention. EncodeToJPG writes the visually upright image;
-            // reversing the rows here inverted the JPEG received by Python.
-            // OpenCV then exposes that JPEG as the required top-left-origin array.
+            // Keep Unity's native Texture2D row order. Its encoder produces the
+            // upright JPEG that Python reads as a top-left-origin image.
             Texture2D result = raw;
             raw = null;
             return result;
         } finally {
             camera.targetTexture = previousTarget;
+            camera.targetDisplay = previousTargetDisplay;
             camera.aspect = previousAspect;
             camera.rect = previousRect;
             RenderTexture.active = previousActive;
             RenderTexture.ReleaseTemporary(target);
             DestroyOwnedTexture(raw);
-            LogCameraState("AfterCaptureTopLeftTexture");
+            LogCameraState("AfterCaptureTopLeftTexture", camera);
         }
     }
 
@@ -260,8 +265,17 @@ public class ShelfLocationBridge : MonoBehaviour {
     }
 
     public byte[] CaptureRuntimeJpeg(int quality, out FrameInputData metadata) {
-        Camera camera = ResolveCamera();
-        string frameId = $"frame_{Time.frameCount:D6}";
+        return CaptureRuntimeJpeg(ResolveCamera(), quality, "frame", out metadata);
+    }
+
+    public byte[] CaptureRuntimeJpeg(
+        Camera camera, int quality, string frameIdPrefix, out FrameInputData metadata) {
+        if (camera == null) throw new ArgumentNullException(nameof(camera));
+        if (captureWidth <= 0 || captureHeight <= 0)
+            throw new InvalidOperationException("Capture dimensions must be positive.");
+        string safePrefix = SanitizeFrameIdPart(frameIdPrefix);
+        int sequence = ++runtimeCaptureSequence;
+        string frameId = $"{safePrefix}_{Time.frameCount:D6}_{sequence:D4}";
         Texture2D texture = CaptureTopLeftTexture(camera);
         try {
             metadata = BuildFrameMetadata(
@@ -270,6 +284,15 @@ public class ShelfLocationBridge : MonoBehaviour {
         } finally {
             DestroyOwnedTexture(texture);
         }
+    }
+
+    static string SanitizeFrameIdPart(string value) {
+        if (string.IsNullOrWhiteSpace(value)) return "frame";
+        var result = new StringBuilder(value.Length);
+        foreach (char character in value.Trim().ToLowerInvariant())
+            result.Append(char.IsLetterOrDigit(character) || character == '-' || character == '_'
+                ? character : '_');
+        return result.Length > 0 ? result.ToString() : "frame";
     }
 
     public void CaptureOfflineFrame() => StartCoroutine(CaptureOffline());

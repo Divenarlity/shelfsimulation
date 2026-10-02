@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using UnityEditor;
 using UnityEditor.Build.Reporting;
@@ -22,6 +23,40 @@ public static class ShelfInferenceContractChecks {
             "\"global_bbox_xyxy\":[320,180,960,540],"+
             "\"sections\":{\"SOL\":0,\"ORTA\":0,\"SAĞ\":0},\"detections\":[]}]}";
         var response=ShelfInferenceResponse.Parse(json);
+        string rightJson=json.Replace("frame_000001","frame_000001_right");
+        string dualJson="{\"success\":true,\"mode\":\"dual_camera_batch\","+
+            "\"left\":"+json+",\"right\":"+rightJson+","+
+            "\"timing\":{\"dual_total_ms\":20,\"shelf_batch_size\":2,\"empty_batch_size\":2},"+
+            "\"counts\":{\"shelf_model_predict_calls\":1,\"shelf_model_inputs\":2,"+
+            "\"empty_model_predict_calls\":1,\"left_empty_inputs\":1,"+
+            "\"right_empty_inputs\":1,\"total_empty_inputs\":2}}";
+        DualShelfInferenceResponse dualResponse=DualShelfInferenceResponse.Parse(dualJson);
+        if(dualResponse.left.frame_id!="frame_000001"||
+           dualResponse.right.frame_id!="frame_000001_right"||
+           dualResponse.counts.shelf_model_predict_calls!=1||
+           dualResponse.counts.shelf_model_inputs!=2||
+           dualResponse.counts.empty_model_predict_calls!=1||
+           dualResponse.counts.total_empty_inputs!=2)
+            throw new Exception("Valid dual inference response could not be parsed.");
+        string routeSession=DualShelfScanController.CreateSessionId(
+            new DateTime(2026,10,2,14,5,12),"abcdef12");
+        if(routeSession!="session_20261002_140512_abcdef12")
+            throw new Exception("The route session ID is not filesystem-safe and deterministic.");
+        Dictionary<string,string> stationOne=ShelfInferenceClient.BuildOperationalMetadata(
+            routeSession,"A-01");
+        Dictionary<string,string> stationTwo=ShelfInferenceClient.BuildOperationalMetadata(
+            routeSession,"A-02");
+        if(stationOne.Count!=2||stationOne["session_id"]!=routeSession||
+           stationTwo["session_id"]!=routeSession||stationOne["station_id"]!="A-01"||
+           stationTwo["station_id"]!="A-02"||stationOne.ContainsKey("expected_shelf_id")||
+           stationOne.ContainsKey("expectedLeftShelves")||
+           stationOne.ContainsKey("expectedRightShelves"))
+            throw new Exception("Dual scan operational metadata leaked ground truth or changed sessions.");
+        var completionIds=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if(!ShelfInferenceClient.TryRegisterCompletionRequest(completionIds,routeSession)||
+           ShelfInferenceClient.TryRegisterCompletionRequest(completionIds,routeSession)||
+           completionIds.Count!=1)
+            throw new Exception("A route completion could be sent more than once.");
         if(response.shelves.Length!=1||response.shelves[0].shelf_id!="A-L-01-01"||
            response.shelves[0].parent_shelf_id!="A-L-01"||
            response.shelves[0].shelf_level_id!="A-L-01-01"||response.shelves[0].level_number!=1||
@@ -170,6 +205,8 @@ public static class ShelfInferenceContractChecks {
             Quaternion rotationBefore=camera.transform.rotation;
             Rect rectBefore=camera.rect;
             float aspectBefore=camera.aspect;
+            camera.targetDisplay=1;
+            int targetDisplayBefore=camera.targetDisplay;
             RenderTexture targetBefore=camera.targetTexture;
             Matrix4x4 projectionBefore=camera.projectionMatrix;
             var metadata=bridge.BuildFrameMetadata(camera,1280,720,"frame_test","frame_test.jpg");
@@ -179,9 +216,40 @@ public static class ShelfInferenceContractChecks {
                 throw new Exception("Ground truth leaked into runtime metadata.");
             if(camera.transform.position!=positionBefore||camera.transform.rotation!=rotationBefore||
                camera.rect!=rectBefore||camera.aspect!=aspectBefore||
-               camera.targetTexture!=targetBefore||
+               camera.targetTexture!=targetBefore||camera.targetDisplay!=targetDisplayBefore||
                !MatrixApproximately(camera.projectionMatrix,projectionBefore))
                 throw new Exception("BuildFrameMetadata mutated the live camera.");
+
+            var rightCameraObject=new GameObject("InferenceMetadataRightCamera");
+            rightCameraObject.transform.SetParent(cameraObject.transform,false);
+            var rightCamera=rightCameraObject.AddComponent<Camera>();
+            rightCamera.CopyFrom(camera);
+            rightCamera.transform.localRotation=Quaternion.Euler(0f,180f,0f);
+            var rightMetadata=bridge.BuildFrameMetadata(
+                rightCamera,1280,720,"station_a_01_right","station_a_01_right.jpg");
+            if(metadata.frame_id==rightMetadata.frame_id||
+               metadata.camera.rotation_xyzw[0]==rightMetadata.camera.rotation_xyzw[0]&&
+               metadata.camera.rotation_xyzw[1]==rightMetadata.camera.rotation_xyzw[1]&&
+               metadata.camera.rotation_xyzw[2]==rightMetadata.camera.rotation_xyzw[2]&&
+               metadata.camera.rotation_xyzw[3]==rightMetadata.camera.rotation_xyzw[3]||
+               Mathf.Abs(metadata.camera.intrinsics.fx-rightMetadata.camera.intrinsics.fx)>.001f||
+               Mathf.Abs(metadata.camera.intrinsics.fy-rightMetadata.camera.intrinsics.fy)>.001f)
+                throw new Exception("Explicit dual-camera metadata lost side-specific pose or frame identity.");
+
+            DualShelfScanState[] validSequence={
+                DualShelfScanState.Initializing, DualShelfScanState.Moving,
+                DualShelfScanState.Aligning, DualShelfScanState.Settling,
+                DualShelfScanState.CapturingDualView, DualShelfScanState.DualInference,
+                DualShelfScanState.DualResultReady,
+                DualShelfScanState.StationComplete, DualShelfScanState.MovingToNextAisle,
+                DualShelfScanState.Moving
+            };
+            for(int i=1;i<validSequence.Length;i++)
+                if(!DualShelfScanController.IsLegalTransition(validSequence[i-1],validSequence[i]))
+                    throw new Exception("The required dual-scan state sequence was rejected.");
+            if(DualShelfScanController.IsLegalTransition(
+                   DualShelfScanState.DualInference,DualShelfScanState.Completed))
+                throw new Exception("A dual inference could bypass result readiness.");
 
             byte[] captured=bridge.CaptureRuntimeJpeg(85,out FrameInputData capturedMetadata);
             if(captured==null||captured.Length==0||capturedMetadata.image.width!=64||
@@ -189,7 +257,8 @@ public static class ShelfInferenceContractChecks {
                 throw new Exception("Camera-state capture guard did not produce an image.");
             if(camera.transform.position!=positionBefore||camera.transform.rotation!=rotationBefore||
                camera.rect!=rectBefore||Mathf.Abs(camera.aspect-aspectBefore)>.0001f||
-               camera.targetTexture!=targetBefore||RenderTexture.active!=priorActive||
+               camera.targetTexture!=targetBefore||camera.targetDisplay!=targetDisplayBefore||
+               RenderTexture.active!=priorActive||
                !MatrixApproximately(camera.projectionMatrix,projectionBefore))
                 throw new Exception("Inference capture permanently mutated camera state.");
 
@@ -253,6 +322,23 @@ public static class ShelfInferenceContractChecks {
                hud.IsPythonVisualizationVisible||hud.CurrentVisualizationTexture!=null)
                 throw new Exception("A stale visualization frame was accepted or retained.");
             UnityEngine.Object.DestroyImmediate(staleTexture);
+            hud.EnableDualCameraMode(true);
+            if(hud.CanvasTransform.GetComponent<Canvas>().targetDisplay!=0||
+               hud.RightCanvas==null||hud.RightCanvas.targetDisplay!=1||
+               !hud.RightCanvas.gameObject.activeSelf)
+                throw new Exception("Display-specific overlay canvases are not configured for 0/1.");
+            hud.PrepareVisualizationFrame("LEFT","station_a_01_left");
+            hud.PrepareVisualizationFrame("RIGHT","station_a_01_right");
+            var leftDualTexture=new Texture2D(16,9,TextureFormat.RGB24,false);
+            var rightDualTexture=new Texture2D(16,9,TextureFormat.RGB24,false);
+            if(!hud.TryShowVisualization(
+                   "LEFT","station_a_01_left",leftDualTexture,1280,720)||
+               !hud.TryShowVisualization(
+                   "RIGHT","station_a_01_right",rightDualTexture,1280,720)||
+               !hud.IsPythonVisualizationVisible||!hud.IsRightVisualizationVisible||
+               hud.VisualizationFrameId!="station_a_01_left"||
+               hud.RightVisualizationFrameId!="station_a_01_right")
+                throw new Exception("Dual annotated frames were not retained independently.");
             hud.SetVisualizationMode(ShelfVisualizationMode.UnityGeometryOverlay);
             if(hud.IsPythonVisualizationVisible||!hud.IsGeometryOverlayVisible||
                !hud.IsAlertCardVisible)

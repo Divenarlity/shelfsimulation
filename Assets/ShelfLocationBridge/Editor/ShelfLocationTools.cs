@@ -6,13 +6,15 @@ using UnityEditor.SceneManagement;
 using UnityEngine;
 
 public static class ShelfLocationTools {
+    const string MarketScenePath = "Assets/Market_01.unity";
+
     public static void ValidateMarketSceneBatch() {
-        EditorSceneManager.OpenScene("Assets/Market_01.unity", OpenSceneMode.Single);
+        EditorSceneManager.OpenScene(MarketScenePath, OpenSceneMode.Single);
         ValidateScene(true);
     }
 
     public static void ExportMarketSceneBatch() {
-        EditorSceneManager.OpenScene("Assets/Market_01.unity", OpenSceneMode.Single);
+        EditorSceneManager.OpenScene(MarketScenePath, OpenSceneMode.Single);
         ValidateScene(true);
         GetBridge().ExportStoreMap();
     }
@@ -40,7 +42,13 @@ public static class ShelfLocationTools {
         EditorUtility.SetDirty(bridge);
         EditorUtility.SetDirty(client);
         EditorUtility.SetDirty(recorder);
-        Debug.Log("Shelf inference setup is complete on the client GameObject.");
+        Debug.Log("Shelf inference setup is complete on the stationary camera rig.");
+    }
+
+    [DrawGizmo(GizmoType.Selected | GizmoType.NonSelected)]
+    static void DrawKnownShelfLabel(KnownShelfRegion shelf, GizmoType _) {
+        if (shelf != null && shelf.activeRegion)
+            Handles.Label(shelf.Center, shelf.shelfId);
     }
 
     static UnitySequenceRecorder GetRecorder() {
@@ -115,6 +123,12 @@ public static class ShelfLocationTools {
         if (recorders.Length == 1 && recorders[0].bridge != bridge)
             errors.Add("UnitySequenceRecorder.bridge does not reference the scene bridge.");
 
+        int persistedRuntimeCanvases = 0;
+        foreach (GameObject root in EditorSceneManager.GetActiveScene().GetRootGameObjects())
+            ValidateSceneHierarchy(root, errors, ref persistedRuntimeCanvases);
+        if (persistedRuntimeCanvases > 0)
+            errors.Add("ShelfInferenceCanvas is runtime-owned and must not be saved in the scene.");
+
         var ids = new HashSet<string>();
         List<ShelfMapEntry> entries = bridge.Entries();
         if (entries.Count == 0) errors.Add("No active KnownShelfRegion components were found.");
@@ -125,6 +139,20 @@ public static class ShelfLocationTools {
             if (geometryError != null) errors.Add($"{entry.shelf_id}: {geometryError}");
         }
         return errors;
+    }
+
+    static void ValidateSceneHierarchy(
+        GameObject gameObject, List<string> errors, ref int persistedRuntimeCanvases) {
+        int missingScripts = GameObjectUtility.GetMonoBehavioursWithMissingScriptCount(gameObject);
+        if (missingScripts > 0)
+            errors.Add($"{gameObject.name} has {missingScripts} missing script reference(s).");
+        if (gameObject.name.StartsWith("ScanPoint_", StringComparison.Ordinal) ||
+            gameObject.name.StartsWith("TransitPoint_", StringComparison.Ordinal) ||
+            gameObject.name.IndexOf("PatrolRoute", StringComparison.OrdinalIgnoreCase) >= 0)
+            errors.Add($"Obsolete camera route object remains: {gameObject.name}.");
+        if (gameObject.name == "ShelfInferenceCanvas") persistedRuntimeCanvases++;
+        foreach (Transform child in gameObject.transform)
+            ValidateSceneHierarchy(child.gameObject, errors, ref persistedRuntimeCanvases);
     }
 
     static void ValidateScene(bool throwOnError) {

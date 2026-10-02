@@ -823,7 +823,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 1ca002da428252441b92f28d83c8a65f, type: 3}
-  m_Name: 
+  m_Name:
   m_EditorClassIdentifier: Unity.ProBuilder::UnityEngine.ProBuilder.Shapes.ProBuilderShape
   m_Shape:
     rid: 5280531643560362192
@@ -847,7 +847,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 8233d90336aea43098adf6dbabd606a2, type: 3}
-  m_Name: 
+  m_Name:
   m_EditorClassIdentifier: Unity.ProBuilder::UnityEngine.ProBuilder.ProBuilderMesh
   m_MeshFormatVersion: 2
   m_Faces:
@@ -1404,6 +1404,7 @@ MonoBehaviour:
   simulatedPoseQuality: 1
   relocalized: 1
   scaleInitialized: 1
+  logCameraState: 0
 --- !u!114 &403308980
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1419,11 +1420,12 @@ MonoBehaviour:
   serverUrl: http://127.0.0.1:8000
   autoStart: 1
   startupDelay: 1
-  inferenceInterval: 1
+  inferenceInterval: 2.5
   timeoutSeconds: 30
   bridge: {fileID: 403308979}
   jpegQuality: 80
   showOverlay: 1
+  visualizationMode: 0
   debugLogging: 0
   hud: {fileID: 0}
 --- !u!114 &403308981

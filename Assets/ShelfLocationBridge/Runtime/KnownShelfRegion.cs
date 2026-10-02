@@ -38,8 +38,5 @@ public class KnownShelfRegion : MonoBehaviour {
             Gizmos.DrawLine(corners[i], corners[(i + 1) % corners.Length]);
         Gizmos.color = Color.cyan;
         Gizmos.DrawLine(Center, Center + FrontNormal * .5f);
-#if UNITY_EDITOR
-        UnityEditor.Handles.Label(Center, shelfId);
-#endif
     }
 }

@@ -78,6 +78,11 @@ public class ShelfInferenceResponse {
         } catch (Exception exception) {
             throw new FormatException("Inference response is not valid JSON.", exception);
         }
+        Validate(response);
+        return response;
+    }
+
+    public static void Validate(ShelfInferenceResponse response) {
         if (response == null || !response.success || string.IsNullOrWhiteSpace(response.frame_id) ||
             response.image == null || response.image.width <= 0 || response.image.height <= 0 ||
             response.counts == null || response.shelves == null)
@@ -90,6 +95,66 @@ public class ShelfInferenceResponse {
                 shelf.detections == null)
                 throw new FormatException("Inference response contains an incomplete shelf.");
         }
+    }
+}
+
+[Serializable]
+public sealed class DualShelfInferenceTiming {
+    public float dual_total_ms, shelf_batch_inference_ms;
+    public int shelf_batch_size;
+    public float left_mapping_ms, right_mapping_ms, empty_batch_inference_ms;
+    public int empty_batch_size;
+    public float left_association_ms, right_association_ms;
+    public float left_visualization_render_ms, right_visualization_render_ms;
+    public float visualization_encode_ms;
+}
+
+[Serializable]
+public sealed class DualShelfInferenceCounts {
+    public int shelf_model_predict_calls, shelf_model_inputs, empty_model_predict_calls;
+    public int left_empty_inputs, right_empty_inputs, total_empty_inputs;
+    public int left_final_empty_spaces, right_final_empty_spaces;
+}
+
+[Serializable]
+public sealed class ScanPersistenceResult {
+    public bool enabled, saved, duplicate_ignored;
+    public string session_id, station_id, session_directory, warning;
+    public float save_ms;
+}
+
+[Serializable]
+public sealed class DualShelfInferenceResponse {
+    public bool success;
+    public string mode;
+    public ShelfInferenceResponse left, right;
+    public DualShelfInferenceTiming timing;
+    public DualShelfInferenceCounts counts;
+    public ScanPersistenceResult persistence;
+
+    public static DualShelfInferenceResponse Parse(string json) {
+        if (string.IsNullOrWhiteSpace(json))
+            throw new FormatException("Dual inference response is empty.");
+        DualShelfInferenceResponse response;
+        try {
+            response = JsonUtility.FromJson<DualShelfInferenceResponse>(json);
+        } catch (Exception exception) {
+            throw new FormatException("Dual inference response is not valid JSON.", exception);
+        }
+        if (response == null || !response.success || response.mode != "dual_camera_batch" ||
+            response.timing == null || response.counts == null)
+            throw new FormatException("Dual inference response is missing its batch contract.");
+        ShelfInferenceResponse.Validate(response.left);
+        ShelfInferenceResponse.Validate(response.right);
+        if (response.left.frame_id == response.right.frame_id)
+            throw new FormatException("Dual inference response frame IDs must be distinct.");
+        if (response.counts.shelf_model_predict_calls != 1 ||
+            response.counts.shelf_model_inputs != 2 ||
+            response.counts.empty_model_predict_calls < 0 ||
+            response.counts.empty_model_predict_calls > 1 ||
+            response.counts.total_empty_inputs !=
+                response.counts.left_empty_inputs + response.counts.right_empty_inputs)
+            throw new FormatException("Dual inference response contains invalid batch counts.");
         return response;
     }
 }
